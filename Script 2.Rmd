@@ -1,0 +1,690 @@
+---
+title: "BREAST CANCER SURVIVAL PREDICTION FOR DECISION SUPPORT SYSTEM"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+
+#install.packages(c("survival", "survminer", "caret", "randomForest", "e1071"))
+
+library(tidyverse)
+library(dplyr)
+library(survival)
+library(survminer)
+library(caret)
+library(randomForest)
+library(e1071)
+library(survival)
+library(survminer)
+
+```
+
+# DATA CLEANING
+
+```{r libary, message=FALSE, warning=FALSE}
+model_data <- read.csv("model_data.csv")
+head(data)
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+colSums(is.na(model_data))
+```
+
+
+
+
+
+## FEATURE ENGINEERING 
+```{r preprocessing}
+library(dplyr)
+
+# Feature Engineering
+fe_model_data <- model_data
+
+# 1. Binning
+fe_model_data <- fe_model_data %>%
+  mutate(
+    Age_Group = cut(Age_at_Diagnosis,
+                    breaks = c(0, 30, 45, 60, 75, 100),
+                    labels = c("Below_30", "30_45", "45_60", "60_75", "Above_75"),
+                    right = FALSE),
+    
+    Tumor_Size_Group = cut(Tumor_Size,
+                    breaks = c(0, 10, 20, 50, 100, 500),
+                    labels = c("Tiny", "Small", "Medium", "Large", "Huge"),
+                    right = FALSE)
+  )
+
+# 2. Interaction Terms
+fe_model_data <- fe_model_data %>%
+  mutate(
+    ER_PR = as.numeric(ER) * as.numeric(PR),
+  )
+
+# 3. Reduce rare levels
+cancer_type_counts <- table(fe_model_data$Cancer_Type_Detailed)
+rare_types <- names(cancer_type_counts[cancer_type_counts < 50])
+
+fe_model_data$Cancer_Type_Detailed <- as.character(fe_model_data$Cancer_Type_Detailed)
+fe_model_data$Cancer_Type_Detailed[fe_model_data$Cancer_Type_Detailed %in% rare_types] <- "Other"
+fe_model_data$Cancer_Type_Detailed <- as.factor(fe_model_data$Cancer_Type_Detailed)
+fe_model_data <- fe_model_data[-1]
+head(fe_model_data)
+```
+
+
+# DATA MODELLING FOR SURVIVAL ANALYSIS
+
+```{r}
+# Update fe_model_data not model_data!
+fe_model_data$Tumor_Stage <- factor(fe_model_data$Tumor_Stage, 
+                                    levels = c("Stage I", "Stage II", "Stage III", "Stage IV"))
+fe_model_data$ER <- factor(fe_model_data$ER, levels = c(0, 1))
+fe_model_data$PR <- factor(fe_model_data$PR, levels = c(0, 1))
+fe_model_data$HER2 <- factor(fe_model_data$HER2, levels = c(0, 1))
+fe_model_data$Chemo <- factor(fe_model_data$Chemo, levels = c(0, 1))
+fe_model_data$Hormone <- factor(fe_model_data$Hormone, levels = c(0, 1))
+fe_model_data$Radio <- factor(fe_model_data$Radio, levels = c(0, 1))
+fe_model_data$Menopause <- factor(fe_model_data$Menopause, levels = c(0, 1))
+# fe_model_data$Age_Group <- factor(fe_model_data$Age_Group, levels = c(1:5), labels = c("Below_30", "30_45", "45_60", "60_75", "Above_75"))
+# fe_model_data$Tumor_Size_Group <- factor(fe_model_data$Tumor_Size_Group, levels = c(1:5), labels = c("Tiny", "Small", "Medium", "Large", "Huge"))
+fe_model_data$Cancer_Type_Detailed <- factor(fe_model_data$Cancer_Type_Detailed,
+                                               levels = c("Breast Invasive Ductal Carcinoma", 
+                                                          "Breast Invasive Lobular Carcinoma",
+                                                          "Breast Mixed Ductal and Lobular Carcinoma", "Other"))
+
+fe_model_data$ER_PR <- factor(fe_model_data$ER_PR, levels = c(0, 1))
+
+
+
+# Ensure overall survival is numeric
+fe_model_data$Overall_Survival_Months_ <- as.numeric(fe_model_data$Overall_Survival_Months_)
+```
+
+
+## DATA PREPROCESSING AND SPLITTING
+```{r message=FALSE, warning=FALSE}
+library(caret)
+
+# Prepare binary classification targets
+fe_model_data$Surv_Status <- factor(fe_model_data$Surv_Status, levels = c(0, 1))
+fe_model_data$Relapse_Status <- factor(fe_model_data$Relapse_Status, levels = c(0, 1))
+
+# Split into train/test
+set.seed(123)
+train_index <- createDataPartition(fe_model_data$Surv_Status, p = 0.8, list = FALSE)
+
+train_data <- fe_model_data[train_index, ]
+test_data <- fe_model_data[-train_index, ]
+
+# Set targets
+ss_train <- train_data$Surv_Status
+rs_train <- train_data$Relapse_Status
+x_train <- train_data[, setdiff(names(train_data), c("Surv_Status", "Overall_Survival_Months_", "Relapse_Status", "Relapse_Months"))]
+
+ss_test <- test_data$Surv_Status
+rs_test <- test_data$Relapse_Status
+x_test <- test_data[, setdiff(names(test_data), c("Surv_Status", "Overall_Survival_Months_", "Relapse_Status", "Relapse_Months"))]
+
+# For survival months prediction
+sm_train <- train_data$Overall_Survival_Months_
+# sm_test <- test_data$Overall_Survival_Months_
+rm_train <- train_data$Relapse_Months
+# rm_test <- test_data$Relapse_Months
+
+x_train_m <- x_train
+x_test_m <- x_test
+
+```
+
+
+
+
+
+
+
+# TRAINING MODELS
+
+## OVERALL SURVIVAL STATUS
+
+```{r lr}
+ss_log_reg_model <- glm(ss_train ~ .,
+                     data = x_train, family = "binomial")
+
+# Summary of the model
+summary(ss_log_reg_model)
+
+
+# Predict on test data
+ss_predictions_status <- predict(ss_log_reg_model, newdata = x_test, type = "response")
+ss_pred_class_status <- ifelse(ss_predictions_status > 0.5, 1, 0)  # 1 = Dead, 0 = Alive
+
+# Confusion Matrix to evaluate the performance
+ss_conf_matrix_status <- confusionMatrix(factor(ss_pred_class_status), factor(ss_test))
+print(ss_conf_matrix_status)
+
+```
+
+
+### Random Forest
+```{r RF}
+library(randomForest)
+
+set.seed(123)
+ss_rf_model <- randomForest(ss_train ~ .,
+                         data = x_train, ntree = 500, importance = TRUE)
+
+
+# Predict and evaluate
+ss_rf_prop <- predict(ss_rf_model, newdata = x_test, type = "prob")
+# Pick the class (column name) with the highest probability for each observation
+ss_rf_pred <- colnames(ss_rf_prop)[max.col(ss_rf_prop, ties.method = "first")]
+ss_rf_pred <- factor(ss_rf_pred, levels = c("0", "1"))
+
+
+
+confusionMatrix(ss_rf_pred, factor(ss_test))
+
+```
+
+
+
+```{r glm}
+library(glmnet)
+
+# Create matrices
+x_train_matrix <- model.matrix(~ . -1, data = x_train)
+x_test_matrix <- model.matrix(~ . -1, data = x_test)
+
+# Fit model (alpha=0.5 for Elastic Net)
+ss_cv_model <- cv.glmnet(x_train_matrix, ss_train, alpha = 0.5, family = "binomial")
+
+# Predict
+ss_enet_pred <- predict(ss_cv_model, newx = x_test_matrix, s = "lambda.min", type = "response")
+ss_enet_pred_class <- ifelse(enet_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(ss_enet_pred_class), as.factor(ss_test))
+```
+
+
+
+```{r xgboost}
+
+library(xgboost)
+
+
+ss_xgb_model <- xgboost(data = x_train_matrix, label = as.numeric(ss_train) - 1,
+                     objective = "binary:logistic", nrounds = 100, max.depth = 6, eta = 0.1)
+
+# Prediction
+ss_xgb_pred <- predict(ss_xgb_model, newdata = x_test_matrix)
+ss_xgb_pred_class <- ifelse(xgb_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(ss_xgb_pred_class), ss_test)
+
+
+```
+
+
+
+
+
+
+
+
+
+## OVERALL SURVIVAL  MONTHS
+```{r}
+
+# Train a Linear Regression model for Overall Survival Months
+sm_linear_reg_model <- lm(sm_train ~ .,
+                       data = x_train_m)
+
+# Summary of the model
+summary(sm_linear_reg_model)
+
+# Predict on test data
+sm_predictions_osm <- predict(sm_linear_reg_model, newdata = x_test_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+sm_rmse_osm <- sqrt(mean((sm_predictions_osm - sm_test)^2))
+print(paste("RMSE for Linear Regression:", sm_rmse_osm))
+
+```
+
+
+
+```{r}
+library(randomForest)
+
+# Train a Random Forest Regression model
+sm_rf_reg_model <- randomForest(sm_train ~ .,
+                             data = x_train_m, ntree = 500)
+
+# Predict on test data
+sm_rf_reg_pred <- predict(sm_rf_reg_model, newdata = x_test_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+sm_rf_reg_rmse <- sqrt(mean((sm_rf_reg_pred - sm_test)^2))
+print(paste("RMSE for Random Forest Regression:", sm_rf_reg_rmse))
+```
+
+```{r glmt}
+library(glmnet)
+
+# Create matrices
+x_train_matrix_m <- model.matrix(~ . -1, data = x_train_m)
+x_test_matrix_m <- model.matrix(~ . -1, data = x_test_m)
+
+# Create matrices
+# Fit model (alpha=0.5 for Elastic Net)
+sm_cv_model_osm <- cv.glmnet(x_train_matrix_m, sm_train, alpha = 0.5)
+
+# Predict
+sm_enet_pred_osm <- predict(sm_cv_model_osm, newx = x_test_matrix_m, s = "lambda.min")
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+sm_enet_rmse_osm <- sqrt(mean((sm_enet_pred_osm - sm_test)^2))
+print(paste("RMSE for Elastic Net Regression:", sm_enet_rmse_osm))
+```
+
+
+
+```{r xgboost}
+library(xgboost)
+
+# Train an XGBoost model
+sm_xgb_model_osm <- xgboost(data = x_train_matrix_m, label = sm_train,
+                         objective = "reg:squarederror", nrounds = 100, max.depth = 6, eta = 0.1)
+
+# Predict
+sm_xgb_pred_osm <- predict(sm_xgb_model_osm, newdata = x_test_matrix_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+sm_xgb_rmse_osm <- sqrt(mean((sm_xgb_pred_osm - sm_test)^2))
+print(paste("RMSE for XGBoost Regression:", sm_xgb_rmse_osm))
+```
+
+
+
+
+
+## RELAPSE STATUS MODEL TRAINING
+
+```{r lr}
+rs_log_reg_model <- glm(rs_train ~ .,
+                     data = x_train, family = "binomial")
+
+# Summary of the model
+summary(rs_log_reg_model)
+
+
+# Predict on test data
+predictions_status <- predict(rs_log_reg_model, newdata = x_test, type = "response")
+pred_class_status <- ifelse(predictions_status > 0.5, 1, 0)  # 1 = Dead, 0 = Alive
+
+# Confusion Matrix to evaluate the performance
+rs_conf_matrix_status <- confusionMatrix(factor(pred_class_status), factor(rs_test))
+print(rs_conf_matrix_status)
+
+```
+
+
+### Random Forest
+```{r RF}
+library(randomForest)
+
+set.seed(123)
+rs_rf_model <- randomForest(rs_train ~ .,
+                         data = x_train, ntree = 500, importance = TRUE)
+
+# Predict and evaluate
+rs_rf_pred <- predict(rs_rf_model, newdata = x_test)
+
+confusionMatrix(rs_rf_pred, factor(rs_test))
+
+```
+
+
+
+```{r glm}
+library(glmnet)
+
+# Fit model (alpha=0.5 for Elastic Net)
+rs_cv_model <- cv.glmnet(x_train_matrix, rs_train, alpha = 0.5, family = "binomial")
+
+# Predict
+enet_pred <- predict(rs_cv_model, newx = x_test_matrix, s = "lambda.min", type = "response")
+enet_pred_class <- ifelse(enet_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(enet_pred_class), as.factor(rs_test))
+```
+
+
+
+```{r xgboost}
+
+library(xgboost)
+
+
+rs_xgb_model <- xgboost(data = x_train_matrix, label = as.numeric(rs_train) - 1,
+                     objective = "binary:logistic", nrounds = 100, max.depth = 6, eta = 0.1)
+
+# Prediction
+xgb_pred <- predict(rs_xgb_model, newdata = x_test_matrix)
+xgb_pred_class <- ifelse(xgb_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(xgb_pred_class), factor(rs_test))
+
+```
+
+
+
+
+
+
+
+## OVERALL RELAPSE  MONTHS
+```{r lr}
+rm_linear_reg_model <- lm(rm_train ~ .,
+                       data = x_train_m)
+
+# Summary of the model
+summary(rm_linear_reg_model)
+
+# Predict on test data
+rm_predictions_osm <- predict(rm_linear_reg_model, newdata = x_train_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+rm_rmse_osm <- sqrt(mean((rm_predictions_osm - rm_train)^2))
+print(paste("RMSE for Linear Regression:", rm_rmse_osm))
+
+```
+
+
+
+```{r}
+library(randomForest)
+
+# Train a Random Forest Regression model
+rm_rf_reg_model <- randomForest(rm_train ~ .,
+                             data = x_train_m, ntree = 500)
+
+# Predict on test data
+rm_rf_reg_pred <- predict(rm_rf_reg_model, newdata = x_train_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+rm_rf_reg_rmse <- sqrt(mean((rm_rf_reg_pred - rm_train)^2))
+print(paste("RMSE for Random Forest Regression:", rm_rf_reg_rmse))
+```
+
+```{r}
+library(glmnet)
+
+# Create matrices
+# Fit model (alpha=0.5 for Elastic Net)
+rm_cv_model_osm <- cv.glmnet(x_train_matrix_m, rm_train, alpha = 0.5)
+
+# Predict
+rm_enet_pred_osm <- predict(cv_model_osm, newx = x_train_matrix_m, s = "lambda.min")
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+rm_enet_rmse_osm <- sqrt(mean((rm_enet_pred_osm - rm_train)^2))
+print(paste("RMSE for Elastic Net Regression:", rm_enet_rmse_osm))
+```
+
+
+
+```{r xgboost}
+library(xgboost)
+
+# Train an XGBoost model
+rm_xgb_model_osm <- xgboost(data = x_train_matrix_m, label = rm_train,
+                         objective = "reg:squarederror", nrounds = 100, max.depth = 6, eta = 0.1)
+
+# Predict
+rm_xgb_pred_osm <- predict(rm_xgb_model_osm, newdata = x_train_matrix_m)
+
+# Evaluate performance with RMSE (Root Mean Squared Error)
+rm_xgb_rmse_osm <- sqrt(mean((rm_xgb_pred_osm - rm_test)^2))
+print(paste("RMSE for XGBoost Regression:", rm_xgb_rmse_osm))
+```
+
+
+
+
+
+
+
+```{r classification_metric}
+# Collect classification results
+classification_results <- data.frame(
+  Model = c(
+    "Overall Survival - Logistic Regression",
+    "Overall Survival - Random Forest",
+    "Overall Survival - Elastic Net",
+    "Overall Survival - XGBoost",
+    "Relapse Status - Logistic Regression",
+    "Relapse Status - Random Forest",
+    "Relapse Status - Elastic Net",
+    "Relapse Status - XGBoost"
+  ),
+  Accuracy = c(
+    conf_matrix_status$overall["Accuracy"],
+    confusionMatrix(ss_rf_pred, factor(ss_test))$overall["Accuracy"],
+    confusionMatrix(as.factor(ss_enet_pred_class), as.factor(ss_test))$overall["Accuracy"],
+    confusionMatrix(as.factor(ss_xgb_pred_class), ss_test)$overall["Accuracy"],
+    rs_conf_matrix_status$overall["Accuracy"],
+    confusionMatrix(rs_rf_pred, factor(rs_test))$overall["Accuracy"],
+    confusionMatrix(as.factor(enet_pred_class), as.factor(rs_test))$overall["Accuracy"],
+    confusionMatrix(as.factor(xgb_pred_class), factor(rs_test))$overall["Accuracy"]
+  ),
+  Kappa = c(
+    conf_matrix_status$overall["Kappa"],
+    confusionMatrix(rf_pred, factor(ss_test))$overall["Kappa"],
+    confusionMatrix(as.factor(enet_pred_class), as.factor(ss_test))$overall["Kappa"],
+    confusionMatrix(as.factor(xgb_pred_class), ss_test)$overall["Kappa"],
+    rs_conf_matrix_status$overall["Kappa"],
+    confusionMatrix(rs_rf_pred, factor(rs_test))$overall["Kappa"],
+    confusionMatrix(as.factor(enet_pred_class), as.factor(rs_test))$overall["Kappa"],
+    confusionMatrix(as.factor(xgb_pred_class), factor(rs_test))$overall["Kappa"]
+  )
+)
+
+# Print the table
+print(classification_results)
+
+```
+
+
+```{r}
+# Collect regression results
+regression_results <- data.frame(
+  Model = c(
+    "Overall Survival Months - Linear Regression",
+    "Overall Survival Months - Random Forest",
+    "Overall Survival Months - Elastic Net",
+    "Overall Survival Months - XGBoost",
+    "Relapse Months - Linear Regression",
+    "Relapse Months - Random Forest",
+    "Relapse Months - Elastic Net",
+    "Relapse Months - XGBoost"
+  ),
+  RMSE = c(
+    sm_rmse_osm,
+    sm_rf_reg_rmse,
+    sm_enet_rmse_osm,
+    sm_xgb_rmse_osm,
+    rm_rmse_osm,
+    rm_rf_reg_rmse,
+    rm_enet_rmse_osm,
+    rm_xgb_rmse_osm
+  )
+)
+
+# Print the table
+print(regression_results)
+
+```
+
+
+
+## SAVING THE BEST MODEL
+```{r}
+saveRDS(ss_rf_model, "ss_rf_model.rds")
+saveRDS(rf_reg_model, "sm_rf_reg_model.rds")
+saveRDS(rs_cv_model, "rs_cv_model.rds")
+saveRDS(rs_xgb_model, "rs_xgb_model.rds")
+saveRDS(rm_rf_reg_model, "rm_rf_reg_model.rds")
+```
+
+
+
+
+# SIMULATION
+
+```{r new_data}
+# Simulate a new data point for prediction
+new_data <- data.frame(
+  Age_at_Diagnosis = 50,
+  Tumor_Size = 3.5,  # Example size in cm
+  Cancer_Type_Detailed = 3,  # E.g., "Breast Invasive Ductal Carcinoma"
+  Lymph_nodes_examined_positive = 2,
+  Nottingham_prognostic_index = 4.5,
+  Tumor_Stage = 2,  # Tumor stage as a factor
+  Neoplasm_Histologic_Grade = 2,  # Example grade
+  ER = 1,  # ER positive
+  PR = 1,  # PR positive
+  HER2 = 0,  # HER2 negative
+  Chemo = 1,  # Chemotherapy received
+  Hormone = 0,  # Hormone therapy not received
+  Radio = 1,  # Radiotherapy received
+  Menopause = 1  # Post-menopausal
+)
+
+
+
+# View the new data
+new_data
+```
+
+
+```{r}
+
+# Convert Tumor Stage to a factor with appropriate labels
+new_data$Tumor_Stage <- factor(new_data$Tumor_Stage,
+                                levels = c(1, 2, 3, 4),
+                                labels = c("Stage I", "Stage II", "Stage III", "Stage IV"))
+
+
+# Encode ER/PR/HER2 status as binary (Positive = 1, Negative = 0)
+new_data$ER <- factor(new_data$ER, levels = c(0, 1))
+new_data$PR <- factor(new_data$PR,levels = c(0, 1))
+new_data$HER2 <- factor(new_data$HER2, levels = c(0, 1))
+
+new_data$Neoplasm_Histologic_Grade <- factor(new_data$Neoplasm_Histologic_Grade, levels = c(1:3))
+
+# Encode Menopausal state as binary
+new_data$Menopause <- factor(new_data$Menopause, levels = c(0, 1))
+
+# Encode therapies (Chemotherapy, Hormone Therapy, Radiotherapy) as binary
+new_data$Chemo <- factor(new_data$Chemo, levels = c(0, 1))
+new_data$Hormone <- factor(new_data$Hormone, levels = c(0, 1))
+new_data$Radio <- factor(new_data$Radio, levels = c(0, 1))
+
+# Convert Cancer Type Detailed to factor and numeric
+new_data$Cancer_Type_Detailed <- factor(new_data$Cancer_Type_Detailed, levels = c(1:7),
+                                         labels = c("Breast", "Breast Invasive Ductal Carcinoma",
+                                                    "Breast Invasive Lobular Carcinoma", "Breast Invasive Mixed Mucinous Carcinoma",
+                                                    "Breast Mixed Ductal and Lobular Carcinoma", "Invasive Breast Carcinoma", "Others"))
+
+
+
+
+# Ensure necessary columns are present
+new_data <- new_data %>%
+  select(Age_at_Diagnosis, Tumor_Size, Cancer_Type_Detailed,
+         Lymph_nodes_examined_positive, Nottingham_prognostic_index, Tumor_Stage, 
+         Neoplasm_Histologic_Grade, ER, PR, HER2, Chemo, Hormone, Radio, Menopause)
+head(new_data)
+```
+
+
+
+
+
+
+
+### Relapse Free Status
+```{r}
+# Convert new_data to a numeric matrix
+new_x <- model.matrix(~ . - 1, data = new_data)
+
+# Now predict
+rs_prediction <- predict(rs_cv_model, newx = new_x, s = "lambda.min", type = "response")
+
+# Output the predicted survival months
+sm_prediction
+```
+
+
+### Relapse Free Months
+```{r}
+
+# Predict survival status using the pre-trained Elastic Net model (cv_model)
+rm_prediction <- predict(rm_rf_reg_model, newdata = new_data)
+
+
+# Output the predicted survival status
+ss_prediction
+```
+
+
+
+
+
+
+
+
+### Survival Months
+```{r}
+
+#setequal(colnames(x_new_data), colnames(x_train_matrix))  # Should return TRUE
+
+# Predict survival months using the pre-trained XGBoost model (xgb_model_osm)
+sm_prediction <- predict(rf_reg_model, newdata = new_data)
+
+# Output the predicted survival months
+sm_prediction
+```
+
+
+### Survival  Status
+```{r}
+# Create matrix for Elastic Net prediction of Survival Status
+x_new_data <- model.matrix(~ . -1, data = new_data)
+
+# Rename new data columns to match training data
+colnames(x_new_data)[colnames(x_new_data) == "ERYes"] <- "ER1"
+colnames(x_new_data)[colnames(x_new_data) == "PRYes"] <- "PR1"
+colnames(x_new_data)[colnames(x_new_data) == "HER2Yes"] <- "HER21"
+colnames(x_new_data)[colnames(x_new_data) == "ChemoYes"] <- "Chemo1"
+colnames(x_new_data)[colnames(x_new_data) == "HormoneYes"] <- "Hormone1"
+colnames(x_new_data)[colnames(x_new_data) == "RadioYes"] <- "Radio1"
+colnames(x_new_data)[colnames(x_new_data) == "MenopausePost"] <- "Menopause1"
+
+
+# Predict survival status using the pre-trained Elastic Net model (cv_model)
+ss_prediction <- predict(ss_rf_model, newdata = new_data)
+
+
+# Output the predicted survival status
+ss_prediction
+```
+
+
+
+
+
